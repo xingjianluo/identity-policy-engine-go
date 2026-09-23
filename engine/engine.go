@@ -37,6 +37,31 @@ func New(v *token.Verifier, s *session.Store, p *policy.Engine) *Engine {
 }
 
 // Authorize 依次执行令牌校验、会话检查与策略判定。
+// 任一阶段失败即返回，结论与依据均可区分、可追溯。
 func (e *Engine) Authorize(tok, action, resource string) Result {
-	return Result{}
+	claims, err := e.verifier.Verify(tok)
+	if err != nil {
+		reason := token.ReasonMalformed
+		if te, ok := err.(*token.Error); ok {
+			reason = te.Reason
+		}
+		return Result{Allowed: false, Stage: StageToken, Reason: reason}
+	}
+
+	if !e.sessions.Valid(claims.SessionID) {
+		return Result{Allowed: false, Stage: StageSession}
+	}
+
+	trace := e.policies.Evaluate(policy.Request{
+		Subject:  claims.Subject,
+		Roles:    claims.Roles,
+		Action:   action,
+		Resource: resource,
+		Attrs:    claims.Attrs,
+	})
+	return Result{
+		Allowed: trace.Decision == policy.DecisionPermit,
+		Stage:   StagePolicy,
+		Trace:   trace,
+	}
 }
