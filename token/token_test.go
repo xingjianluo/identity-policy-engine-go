@@ -8,16 +8,22 @@ import (
 	"time"
 )
 
-type staticResolver struct{ keys map[string][]byte }
+type staticResolver struct{ keys map[string]ResolvedKey }
 
-func (r staticResolver) Resolve(kid string, _ time.Time) ([]byte, bool) {
+func (r staticResolver) Resolve(kid string, _ time.Time) (ResolvedKey, bool) {
 	k, ok := r.keys[kid]
 	return k, ok
 }
 
+func hmacKey(kid string, alg Algorithm, secret string) ResolvedKey {
+	return ResolvedKey{KeyID: kid, Alg: alg, Material: []byte(secret)}
+}
+
 func newTestVerifier() *Verifier {
 	return NewVerifier(
-		staticResolver{keys: map[string][]byte{"k1": []byte("secret-1")}},
+		staticResolver{keys: map[string]ResolvedKey{
+			"k1": hmacKey("k1", AlgHS256, "secret-1"),
+		}},
 		30*time.Second, AlgHS256, AlgHS384, AlgHS512)
 }
 
@@ -99,7 +105,9 @@ func TestVerifyAlgNotAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := NewVerifier(staticResolver{keys: map[string][]byte{"k1": []byte("secret-1")}}, 0, AlgHS256)
+	v := NewVerifier(staticResolver{keys: map[string]ResolvedKey{
+		"k1": hmacKey("k1", AlgHS384, "secret-1"),
+	}}, 0, AlgHS256)
 	_, err = v.Verify(tok)
 	te := err.(*Error)
 	t.Logf("input=HS384 token, verifier allows HS256 only, reason=%s", te.Reason)

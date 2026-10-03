@@ -3,8 +3,9 @@ package policy
 
 import (
 	"fmt"
+	"sort"
 	"strings"
-	"sync"
+	"sync/atomic"
 )
 
 // Effect 表示策略效果。
@@ -46,6 +47,7 @@ type Policy struct {
 
 // Trace 记录判定依据，保证结论可追溯。
 type Trace struct {
+	VersionNum     int // 本次判定依据的策略版本号（未发布时为 0）
 	Decision       Decision
 	MatchedPermits []string
 	MatchedDenies  []string
@@ -54,35 +56,84 @@ type Trace struct {
 }
 
 func (t Trace) String() string {
-	return fmt.Sprintf("decision=%s permits=%v denies=%v conditionFails=%v why=%s",
-		t.Decision, t.MatchedPermits, t.MatchedDenies, t.ConditionFails, t.Explanation)
+	return fmt.Sprintf("version=%d decision=%s permits=%v denies=%v conditionFails=%v why=%s",
+		t.VersionNum, t.Decision, t.MatchedPermits, t.MatchedDenies, t.ConditionFails, t.Explanation)
 }
 
-// Engine 是策略判定引擎，采用拒绝优先（deny-overrides）合成策略。
-// 策略集通过写锁原子替换，同一输入在更新前后各自可复现。
-type Engine struct {
-	mu       sync.RWMutex
+// snapshot 是一份不可变的策略快照：发布后任何路径都不再修改其切片。
+// 引擎始终原子地整份替换快照，因此并发发布与判定混合时，每次判定看到的
+// 都是某个完整版本，绝不会出现半新半旧的策略集。
+type snapshot struct {
+	version  int
 	policies []Policy
 }
 
-func NewEngine() *Engine { return &Engine{} }
-
-// SetPolicies 原子替换策略集，保证更新前后同一输入结论可复现。
-func (e *Engine) SetPolicies(ps []Policy) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	cp := make([]Policy, len(ps))
-	copy(cp, ps)
-	e.policies = cp
+// Engine 是策略判定引擎，采用拒绝优先（deny-overrides）合成策略。
+// 当前策略集通过原子指针整份替换；每次发布形成不可变版本并永久保留，
+// 支持按版本号做确定性历史回放。
+type Engine struct {
+	current atomic.Pointer[snapshot]
+	// publishMu 把并发发布串行化；已发布版本此后只读，回放无需加锁。
+	publishMu chan struct{}
+	history   atomic.Pointer[[]*Version]
 }
 
-// snapshot 返回当前策略集的拷贝。
-func (e *Engine) snapshot() []Policy {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	cp := make([]Policy, len(e.policies))
-	copy(cp, e.policies)
+func NewEngine() *Engine {
+	e := &Engine{publishMu: make(chan struct{}, 1)}
+	hist := []*Version{}
+	e.history.Store(&hist)
+	return e
+}
+
+// clonePolicies 返回策略集的深拷贝（含切片与 map），隔离调用方后续修改。
+func clonePolicies(ps []Policy) []Policy {
+	cp := make([]Policy, len(ps))
+	for i, p := range ps {
+		c := p
+		if p.Roles != nil {
+			c.Roles = append([]string(nil), p.Roles...)
+		}
+		if p.Actions != nil {
+			c.Actions = append([]string(nil), p.Actions...)
+		}
+		if p.Resources != nil {
+			c.Resources = append([]string(nil), p.Resources...)
+		}
+		if p.Condition != nil {
+			c.Condition = make(map[string]string, len(p.Condition))
+			for k, v := range p.Condition {
+				c.Condition[k] = v
+			}
+		}
+		cp[i] = c
+	}
 	return cp
+}
+
+// SetPolicies 更新工作区策略集，但不发布版本（保持既有调用习惯）。
+// 需要形成不可变版本时调用 Publish。
+func (e *Engine) SetPolicies(ps []Policy) {
+	cp := clonePolicies(ps)
+	e.current.Store(&snapshot{version: 0, policies: cp})
+}
+
+// currentSnapshot 返回当前工作区快照；从未设置过策略时返回空快照。
+func (e *Engine) currentSnapshot() *snapshot {
+	cur := e.current.Load()
+	if cur == nil {
+		return &snapshot{}
+	}
+	return cur
+}
+
+// latestSnapshot 返回判定应使用的快照：优先最新已发布版本，否则当前工作区。
+func (e *Engine) latestSnapshot() *snapshot {
+	hist := *e.history.Load()
+	if n := len(hist); n > 0 {
+		v := hist[n-1]
+		return &snapshot{version: v.Number, policies: v.policies}
+	}
+	return e.currentSnapshot()
 }
 
 func matchAny(patterns []string, value string) bool {
@@ -106,25 +157,28 @@ func matchRole(policyRoles, reqRoles []string) bool {
 }
 
 // conditionSatisfied 检查请求属性是否满足策略条件的全部键值。
+// 条件键按字典序检查，保证 Trace.ConditionFails 的顺序确定可复现。
 func conditionSatisfied(cond map[string]string, attrs map[string]string) (string, bool) {
-	for k, want := range cond {
+	keys := make([]string, 0, len(cond))
+	for k := range cond {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		got, ok := attrs[k]
-		if !ok || got != want {
+		if !ok || got != cond[k] {
 			return k, false
 		}
 	}
 	return "", true
 }
 
-// Evaluate 对请求进行判定并返回带依据的结论。
-// 合成规则：任一 DENY 命中即拒绝（拒绝优先，冲突时 DENY 胜出）；
-// 否则任一 PERMIT 命中即允许；若仅因属性条件未满足则返回 CONDITION_FAILED；
-// 完全无策略覆盖则返回 NO_MATCH。
-func (e *Engine) Evaluate(req Request) Trace {
-	trace := Trace{Decision: DecisionNoMatch}
+// evaluateOn 在给定快照上执行纯函数式判定，保证同快照同输入结果一致。
+func evaluateOn(snap *snapshot, req Request) Trace {
+	trace := Trace{VersionNum: snap.version, Decision: DecisionNoMatch}
 	roleActionMatched := false
 
-	for _, p := range e.snapshot() {
+	for _, p := range snap.policies {
 		if !matchRole(p.Roles, req.Roles) {
 			continue
 		}
@@ -167,4 +221,11 @@ func (e *Engine) Evaluate(req Request) Trace {
 		trace.Explanation = "no policy covers this role/action/resource"
 	}
 	return trace
+}
+
+// Evaluate 始终在“最新已发布版本”上判定；若尚未发布过任何版本，
+// 则在当前工作区（版本号 0）上判定。每次判定只读一个完整快照，
+// 不会出现半新半旧的策略集或跨版本串用依据。
+func (e *Engine) Evaluate(req Request) Trace {
+	return evaluateOn(e.latestSnapshot(), req)
 }

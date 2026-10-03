@@ -5,11 +5,14 @@ package token
 type Reason string
 
 const (
-	ReasonNone              Reason = ""                   // 校验通过
+	ReasonNone Reason = "" // 校验通过
+
 	ReasonMalformed         Reason = "MALFORMED"          // 令牌结构无法解析
 	ReasonAlgNotAllowed     Reason = "ALG_NOT_ALLOWED"    // 签名算法不在允许列表
+	ReasonAlgSubstitution   Reason = "ALG_SUBSTITUTION"   // 头部算法与密钥注册算法族不一致（换算法伪造）
+	ReasonKeyTypeMismatch   Reason = "KEY_TYPE_MISMATCH"  // 算法族一致但密钥材料类型与算法对不上
 	ReasonUnknownKey        Reason = "UNKNOWN_KEY"        // 找不到对应的密钥
-	ReasonSignatureMismatch Reason = "SIGNATURE_MISMATCH" // 签名校验失败
+	ReasonSignatureMismatch Reason = "SIGNATURE_MISMATCH" // 签名与令牌内容确实不匹配
 	ReasonExpired           Reason = "EXPIRED"            // 令牌已过期
 	ReasonNotYetValid       Reason = "NOT_YET_VALID"      // 令牌尚未生效
 	ReasonMissingClaim      Reason = "MISSING_CLAIM"      // 必需声明缺失
