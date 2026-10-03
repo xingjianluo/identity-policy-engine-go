@@ -22,7 +22,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	ks := keys.NewStore()
 	now := time.Now()
-	ks.Add(keys.Key{ID: "k1", Material: []byte("secret-1"),
+	ks.Add(keys.Key{ID: "k1", Alg: token.AlgHS256, Material: []byte("secret-1"),
 		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)})
 
 	ss := session.NewStore()
@@ -40,7 +40,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) issueToken(t *testing.T, kid string, secret string) string {
 	t.Helper()
-	iss := token.NewIssuer(token.AlgHS256, kid, []byte(secret))
+	iss := token.NewIssuer(token.HMACKey(token.AlgHS256, kid, []byte(secret))).WithKID(kid)
 	tok, err := iss.Issue(token.Claims{
 		Subject: "alice", SessionID: "sess-1", Roles: []string{"reader"},
 	}, 10*time.Minute)
@@ -98,7 +98,7 @@ func TestKeyRotationEndToEnd(t *testing.T) {
 	oldTok := f.issueToken(t, "k1", "secret-1")
 
 	// 轮换：加入新密钥，旧密钥保留宽限窗口
-	f.keys.Add(keys.Key{ID: "k2", Material: []byte("secret-2"),
+	f.keys.Add(keys.Key{ID: "k2", Alg: token.AlgHS256, Material: []byte("secret-2"),
 		NotBefore: now, NotAfter: now.Add(2 * time.Hour)})
 
 	// 旧令牌在窗口内仍可通过

@@ -8,22 +8,24 @@ import (
 	"time"
 )
 
-type staticResolver struct{ keys map[string][]byte }
+type staticResolver struct{ keys map[string]ResolvedKey }
 
-func (r staticResolver) Resolve(kid string, _ time.Time) ([]byte, bool) {
+func (r staticResolver) Resolve(kid string, _ time.Time) (ResolvedKey, bool) {
 	k, ok := r.keys[kid]
 	return k, ok
 }
 
 func newTestVerifier() *Verifier {
 	return NewVerifier(
-		staticResolver{keys: map[string][]byte{"k1": []byte("secret-1")}},
+		staticResolver{keys: map[string]ResolvedKey{
+			"k1": HMACKey(AlgHS256, "k1", []byte("secret-1")),
+		}},
 		30*time.Second, AlgHS256, AlgHS384, AlgHS512)
 }
 
 func issueHS256(t *testing.T) string {
 	t.Helper()
-	iss := NewIssuer(AlgHS256, "k1", []byte("secret-1"))
+	iss := NewIssuer(HMACKey(AlgHS256, "k1", []byte("secret-1"))).WithKID("k1")
 	tok, err := iss.Issue(Claims{Subject: "alice", SessionID: "s1", Roles: []string{"admin"}}, time.Hour)
 	if err != nil {
 		t.Fatalf("issue: %v", err)
@@ -94,12 +96,14 @@ func TestVerifyAlgNotAllowed(t *testing.T) {
 	expectReason(t, header+"."+payload+".sig", ReasonAlgNotAllowed)
 
 	// 只允许 HS256 的校验器拒绝 HS384 令牌
-	iss := NewIssuer(AlgHS384, "k1", []byte("secret-1"))
+	iss := NewIssuer(HMACKey(AlgHS384, "k1", []byte("secret-1"))).WithKID("k1")
 	tok, err := iss.Issue(Claims{Subject: "a", SessionID: "s"}, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := NewVerifier(staticResolver{keys: map[string][]byte{"k1": []byte("secret-1")}}, 0, AlgHS256)
+	v := NewVerifier(staticResolver{keys: map[string]ResolvedKey{
+		"k1": HMACKey(AlgHS256, "k1", []byte("secret-1")),
+	}}, 0, AlgHS256)
 	_, err = v.Verify(tok)
 	te := err.(*Error)
 	t.Logf("input=HS384 token, verifier allows HS256 only, reason=%s", te.Reason)
@@ -109,7 +113,7 @@ func TestVerifyAlgNotAllowed(t *testing.T) {
 }
 
 func TestVerifyUnknownKey(t *testing.T) {
-	iss := NewIssuer(AlgHS256, "no-such-key", []byte("x"))
+	iss := NewIssuer(HMACKey(AlgHS256, "no-such-key", []byte("x"))).WithKID("no-such-key")
 	tok, err := iss.Issue(Claims{Subject: "a", SessionID: "s"}, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +122,7 @@ func TestVerifyUnknownKey(t *testing.T) {
 }
 
 func TestVerifyExpired(t *testing.T) {
-	iss := NewIssuer(AlgHS256, "k1", []byte("secret-1"))
+	iss := NewIssuer(HMACKey(AlgHS256, "k1", []byte("secret-1"))).WithKID("k1")
 	iss.now = func() time.Time { return time.Now().Add(-2 * time.Hour) }
 	tok, err := iss.Issue(Claims{Subject: "a", SessionID: "s"}, time.Hour) // 1 小时前已过期
 	if err != nil {
@@ -128,7 +132,7 @@ func TestVerifyExpired(t *testing.T) {
 }
 
 func TestVerifyExpiredWithinLeeway(t *testing.T) {
-	iss := NewIssuer(AlgHS256, "k1", []byte("secret-1"))
+	iss := NewIssuer(HMACKey(AlgHS256, "k1", []byte("secret-1"))).WithKID("k1")
 	iss.now = func() time.Time { return time.Now().Add(-10 * time.Second) }
 	tok, err := iss.Issue(Claims{Subject: "a", SessionID: "s"}, 5*time.Second) // 过期 5 秒，容差 30 秒
 	if err != nil {
@@ -141,7 +145,7 @@ func TestVerifyExpiredWithinLeeway(t *testing.T) {
 }
 
 func TestVerifyNotYetValid(t *testing.T) {
-	iss := NewIssuer(AlgHS256, "k1", []byte("secret-1"))
+	iss := NewIssuer(HMACKey(AlgHS256, "k1", []byte("secret-1"))).WithKID("k1")
 	tok, err := iss.Issue(Claims{
 		Subject: "a", SessionID: "s",
 		NotBefore: time.Now().Add(time.Hour),
@@ -158,7 +162,7 @@ func TestVerifyMissingClaim(t *testing.T) {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(
 		`{"sub":"a","iat":1000,"exp":9999999999}`))
 	input := header + "." + payload
-	sig, err := sign(AlgHS256, []byte("secret-1"), []byte(input))
+	sig, err := sign(AlgHS256, HMACKey(AlgHS256, "k1", []byte("secret-1")), []byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}

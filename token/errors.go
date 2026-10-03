@@ -9,6 +9,8 @@ const (
 	ReasonMalformed         Reason = "MALFORMED"          // 令牌结构无法解析
 	ReasonAlgNotAllowed     Reason = "ALG_NOT_ALLOWED"    // 签名算法不在允许列表
 	ReasonUnknownKey        Reason = "UNKNOWN_KEY"        // 找不到对应的密钥
+	ReasonAlgSubstitution   Reason = "ALG_SUBSTITUTION"   // 非对称算法被替换/降级为对称算法（伪造攻击）
+	ReasonKeyAlgMismatch    Reason = "KEY_ALG_MISMATCH"   // 密钥类型/算法族与令牌头部不匹配
 	ReasonSignatureMismatch Reason = "SIGNATURE_MISMATCH" // 签名校验失败
 	ReasonExpired           Reason = "EXPIRED"            // 令牌已过期
 	ReasonNotYetValid       Reason = "NOT_YET_VALID"      // 令牌尚未生效

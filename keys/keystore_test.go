@@ -5,13 +5,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/xingjianluo/identity-policy-engine-go/token"
 )
 
 func TestRotationOverlapWindow(t *testing.T) {
 	now := time.Now()
-	old := Key{ID: "old", Material: []byte("old-secret"),
+	old := Key{ID: "old", Alg: token.AlgHS256, Material: []byte("old-secret"),
 		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(10 * time.Minute)}
-	newK := Key{ID: "new", Material: []byte("new-secret"),
+	newK := Key{ID: "new", Alg: token.AlgHS256, Material: []byte("new-secret"),
 		NotBefore: now} // 新密钥已生效，旧密钥仍在宽限窗口内
 
 	s := NewStore()
@@ -48,7 +50,7 @@ func TestRotationOverlapWindow(t *testing.T) {
 func TestRetiredKeyRejected(t *testing.T) {
 	now := time.Now()
 	s := NewStore()
-	s.Add(Key{ID: "k1", Material: []byte("x"), NotBefore: now.Add(-time.Hour)})
+	s.Add(Key{ID: "k1", Alg: token.AlgHS256, Material: []byte("x"), NotBefore: now.Add(-time.Hour)})
 
 	if !s.Retire("k1") {
 		t.Fatal("Retire should report success")
@@ -63,17 +65,17 @@ func TestKeyMaterialIsCopied(t *testing.T) {
 	now := time.Now()
 	mat := []byte("original")
 	s := NewStore()
-	s.Add(Key{ID: "k1", Material: mat, NotBefore: now.Add(-time.Hour)})
+	s.Add(Key{ID: "k1", Alg: token.AlgHS256, Material: mat, NotBefore: now.Add(-time.Hour)})
 	mat[0] = 'X' // 外部修改不应影响库内密钥
 
 	got, ok := s.Resolve("k1", now)
-	if !ok || string(got) != "original" {
-		t.Fatalf("key material mutated: %q", got)
+	if !ok || string(got.HMAC) != "original" {
+		t.Fatalf("key material mutated: %q", got.HMAC)
 	}
-	got[0] = 'Y' // 调用方修改返回值不应影响库内密钥
+	got.HMAC[0] = 'Y' // 调用方修改返回值不应影响库内密钥
 	again, _ := s.Resolve("k1", now)
-	if string(again) != "original" {
-		t.Fatalf("returned key material is shared with store: %q", again)
+	if string(again.HMAC) != "original" {
+		t.Fatalf("returned key material is shared with store: %q", again.HMAC)
 	}
 	t.Logf("key material isolation verified")
 }
@@ -81,8 +83,8 @@ func TestKeyMaterialIsCopied(t *testing.T) {
 func TestConcurrentResolveDuringRotation(t *testing.T) {
 	now := time.Now()
 	s := NewStore()
-	s.Add(Key{ID: "old", Material: []byte("old"), NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)})
-	s.Add(Key{ID: "new", Material: []byte("new"), NotBefore: now})
+	s.Add(Key{ID: "old", Alg: token.AlgHS256, Material: []byte("old"), NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)})
+	s.Add(Key{ID: "new", Alg: token.AlgHS256, Material: []byte("new"), NotBefore: now})
 
 	const workers = 32
 	const rounds = 500
