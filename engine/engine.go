@@ -43,24 +43,6 @@ func New(v *token.Verifier, s *session.Store, p *policy.Engine) *Engine {
 // Authorize 依次执行令牌校验、会话检查与策略判定（始终使用最新策略版本）。
 // 任一阶段失败即返回，结论与依据均可区分、可追溯。
 func (e *Engine) Authorize(tok, action, resource string) Result {
-	return e.authorize(tok, action, resource, 0)
-}
-
-// Replay 拿着历史输入与当时的策略版本号，把当时的策略判定重新算一遍。
-// 令牌与会话只做与当时相同的前置校验；策略判定严格使用指定版本，
-// 结论与依据和当初完全一致。版本不存在时返回错误，不给出判定结论。
-func (e *Engine) Replay(tok, action, resource string, policyVersion int64) (Result, error) {
-	if policyVersion < 1 {
-		return Result{}, fmt.Errorf("%w: replay version %d", policy.ErrUnknownVersion, policyVersion)
-	}
-	// 先确认版本存在，避免未知版本被吞成一次普通判定。
-	if _, err := e.policies.Replay(policyVersion, policy.Request{}); err != nil {
-		return Result{}, err
-	}
-	return e.authorize(tok, action, resource, policyVersion), nil
-}
-
-func (e *Engine) authorize(tok, action, resource string, replayVersion int64) Result {
 	claims, err := e.verifier.Verify(tok)
 	if err != nil {
 		reason := token.ReasonMalformed
@@ -81,18 +63,61 @@ func (e *Engine) authorize(tok, action, resource string, replayVersion int64) Re
 		Resource: resource,
 		Attrs:    claims.Attrs,
 	}
-
-	var trace policy.Trace
-	if replayVersion > 0 {
-		// Replay 入口已确认版本存在，此处不会再返回错误。
-		trace, _ = e.policies.Replay(replayVersion, req)
-	} else {
-		trace = e.policies.Evaluate(req)
-	}
+	trace := e.policies.Evaluate(req)
 	return Result{
 		Allowed:       trace.Decision == policy.DecisionPermit,
 		Stage:         StagePolicy,
 		PolicyVersion: trace.Version,
 		Trace:         trace,
 	}
+}
+
+// Replay 拿着历史输入（原始令牌字符串）与当时的策略版本号，把当时的
+// 策略结论与依据原样重算。
+//
+// 回放是取证/审计用途，不是实时授权，因此刻意不受当前时间影响：
+//   - 只从令牌载荷还原当初的主体、角色与属性输入，不校验签名、
+//     不解析密钥、不检查 exp/nbf——令牌如今已过期、未生效，或其签名
+//     密钥已轮换/吊销，都不会改变回放结论；
+//   - 不检查会话当前是否存在、已吊销或已过期；
+//   - 策略判定严格使用指定的历史版本。
+//
+// 版本号不存在时返回包装了 policy.ErrUnknownVersion 的错误，
+// 令牌结构无法解析时返回 *token.Error（Reason 可区分），
+// 二者都不会伪装成一条判定结论。
+func (e *Engine) Replay(tok, action, resource string, policyVersion int64) (Result, error) {
+	claims, err := token.DecodeClaims(tok)
+	if err != nil {
+		return Result{}, err
+	}
+	req := policy.Request{
+		Subject:  claims.Subject,
+		Roles:    claims.Roles,
+		Action:   action,
+		Resource: resource,
+		Attrs:    claims.Attrs,
+	}
+	return e.ReplayRequest(req, policyVersion)
+}
+
+// ReplayRequest 用调用方已留存的原始输入与版本号回放，语义同 Replay：
+// 不做任何令牌/会话时效检查，仅在指定的不可变版本上重算策略结论。
+// 适合当初输入不以令牌形式保存的场景。
+func (e *Engine) ReplayRequest(req policy.Request, policyVersion int64) (Result, error) {
+	if policyVersion < 1 {
+		return Result{}, fmt.Errorf("%w: replay version %d", policy.ErrUnknownVersion, policyVersion)
+	}
+	// 先确认版本存在，避免未知版本被吞成一次普通判定。
+	if _, err := e.policies.Replay(policyVersion, policy.Request{}); err != nil {
+		return Result{}, err
+	}
+	// 版本已确认存在，此处不会再返回错误。
+	trace, _ := e.policies.Replay(policyVersion, req)
+	return Result{
+		// 仅表示「当时那条策略结论是否放行」，不代表此刻的实时访问授权。
+		Allowed:       trace.Decision == policy.DecisionPermit,
+		Stage:         StagePolicy,
+		PolicyVersion: trace.Version,
+		Trace:         trace,
+	}, nil
 }
