@@ -279,6 +279,46 @@ func (i *Issuer) Issue(c Claims, ttl time.Duration) (string, error) {
 
 func unixPtr(t time.Time) *int64 { v := t.Unix(); return &v }
 
+// ParseUnverified 只做结构解析并提取声明，不校验签名、不检查时间、不查密钥。
+// 它仅供历史回放/审计使用：回放要还原的是「当初那条输入」，
+// 不应受当前时间、令牌时效或密钥轮换状态影响。
+// 任何线上判定路径都必须使用 Verify，不得用本函数替代。
+func ParseUnverified(tok string) (Claims, error) {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return Claims{}, fail(ReasonMalformed, "token must have 3 segments, got %d", len(parts))
+	}
+	enc := base64.RawURLEncoding
+	pb, err := enc.DecodeString(parts[1])
+	if err != nil {
+		return Claims{}, fail(ReasonMalformed, "payload is not valid base64url")
+	}
+	var cj claimsJSON
+	if err := json.Unmarshal(pb, &cj); err != nil {
+		return Claims{}, fail(ReasonMalformed, "payload is not valid JSON")
+	}
+	switch {
+	case cj.Subject == nil || *cj.Subject == "":
+		return Claims{}, fail(ReasonMissingClaim, "required claim %q is missing", "sub")
+	case cj.SessionID == nil || *cj.SessionID == "":
+		return Claims{}, fail(ReasonMissingClaim, "required claim %q is missing", "sid")
+	case cj.IssuedAt == nil:
+		return Claims{}, fail(ReasonMissingClaim, "required claim %q is missing", "iat")
+	case cj.ExpiresAt == nil:
+		return Claims{}, fail(ReasonMissingClaim, "required claim %q is missing", "exp")
+	}
+	return Claims{
+		Subject:   *cj.Subject,
+		SessionID: *cj.SessionID,
+		Roles:     cj.Roles,
+		Attrs:     cj.Attrs,
+		IssuedAt:  time.Unix(*cj.IssuedAt, 0),
+		NotBefore: time.Unix(cj.NotBefore, 0),
+		ExpiresAt: time.Unix(*cj.ExpiresAt, 0),
+		KeyID:     cj.KeyID,
+	}, nil
+}
+
 // Verifier 负责校验令牌。
 type Verifier struct {
 	allowed  map[Algorithm]bool

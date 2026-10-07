@@ -71,11 +71,10 @@ type Version struct {
 	policies  []Policy
 }
 
-// Policies 返回该版本冻结的策略拷贝。
+// Policies 返回该版本冻结策略的深拷贝：调用方就地修改返回值中的
+// 角色/动作/资源切片或条件 map，都不会改脏版本本身，也不影响其他读者。
 func (v *Version) Policies() []Policy {
-	cp := make([]Policy, len(v.policies))
-	copy(cp, v.policies)
-	return cp
+	return clonePolicies(v.policies)
 }
 
 // ErrUnknownVersion 表示回放时指定的版本号不存在。
@@ -95,11 +94,25 @@ func NewEngine() *Engine {
 	return &Engine{now: func() int64 { return 0 }}
 }
 
-// clonePolicies 深拷贝策略（含 map），冻结后调用方再修改原切片不影响版本。
+// cloneStrings 拷贝字符串切片；nil 保持 nil。
+func cloneStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	cp := make([]string, len(s))
+	copy(cp, s)
+	return cp
+}
+
+// clonePolicies 深拷贝策略（含全部切片与 map），冻结后调用方再修改
+// 原切片/原 map 中的任何元素都不影响已发布版本。
 func clonePolicies(ps []Policy) []Policy {
 	cp := make([]Policy, len(ps))
 	copy(cp, ps)
 	for i := range cp {
+		cp[i].Roles = cloneStrings(cp[i].Roles)
+		cp[i].Actions = cloneStrings(cp[i].Actions)
+		cp[i].Resources = cloneStrings(cp[i].Resources)
 		if cp[i].Condition != nil {
 			c := make(map[string]string, len(cp[i].Condition))
 			for k, v := range cp[i].Condition {
